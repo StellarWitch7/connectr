@@ -2,16 +2,19 @@ mod data;
 mod request_handler;
 mod resource_manager;
 mod api;
+mod auth;
+mod db_manager;
 
+use std::clone::Clone;
 use std::collections::HashMap;
 use std::io::{Result};
 use std::iter::Iterator;
 use std::ops::Deref;
-use std::path::{Path};
 use std::string::ToString;
 use actix_web::{App, HttpServer, Responder, web};
 use once_cell::sync::Lazy;
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
+use sqlx::mysql::MySqlPoolOptions;
 
 static ARGS: Lazy<HashMap<String, String>> = Lazy::new(|| parse_arguments());
 static ADDRESS: Lazy<&str> = Lazy::new(||
@@ -34,8 +37,9 @@ static SECURE_PORT: Lazy<u16> = Lazy::new(||
     } else {
         0
     });
-static ROOT_PATH: Lazy<&Path> = Lazy::new(|| Path::new(ARGS.get("root")
-    .expect("Server root not provided")));
+static ROOT_PATH: Lazy<String> = Lazy::new(|| shellexpand::tilde(ARGS.get("root")
+    .unwrap())
+    .to_string());
 static KEY_PATH: Lazy<String> = Lazy::new(|| shellexpand::tilde(ARGS.get("key")
     .unwrap())
     .to_string());
@@ -45,10 +49,22 @@ static CERT_PATH: Lazy<String> = Lazy::new(|| shellexpand::tilde(ARGS.get("cert"
 
 #[actix_web::main]
 async fn main() -> Result<()> {
-    println!("Starting server on port {} with address {}", PORT.to_string(), ADDRESS.to_string());
+    println!("Connecting to MySQL database");
+    let pool = MySqlPoolOptions::new()
+        .max_connections(32)
+        .connect("mysql://localhost/test")
+        .await
+        .expect("Failed to connect to MySQL database");
 
+    println!("Starting server on port {} with address {}", PORT.to_string(), ADDRESS.to_string());
     let mut server = HttpServer::new(||
         App::new()
+            .service(web::scope("/api")
+                .service(api::user)
+                .service(api::thread))
+            .service(auth::auth)
+            .service(request_handler::login)
+            .service(request_handler::home)
             .service(request_handler::download)
             .service(request_handler::default));
     server = server.bind(format!("{}:{}", ADDRESS.to_string(), PORT.to_string()))

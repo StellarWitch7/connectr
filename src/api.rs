@@ -1,11 +1,11 @@
 use actix_web::{get, HttpRequest, HttpResponse, Responder};
 
-// #[get("/api/usr/{other_url:.*}")]
-// pub fn user(req: HttpRequest) -> impl Responder {
-//     HttpResponse::NotImplemented().message_body("Not Implemented")
-// }
-//
-// #[get("/api/channel/{other_url:.*}")]
-// pub fn channel(req: HttpRequest) -> impl Responder {
-//     HttpResponse::NotImplemented().message_body("Not Implemented")
-// }
+#[get("/usr/{other_url:.*}")]
+pub async fn user(req: HttpRequest) -> impl Responder {
+    HttpResponse::NotImplemented()
+}
+
+#[get("/channel/{other_url:.*}")]
+pub async fn thread(req: HttpRequest) -> impl Responder {
+    HttpResponse::NotImplemented()
+}
