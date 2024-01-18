@@ -1,0 +1,14 @@
+[package]
+name = "connectr"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = { version = "4.3.1", features = ["openssl"] }
+serde = { version = "1.0.159" , features = ["derive"] }
+clap = "4.4.18"
+shellexpand = "3.1.0"
+once_cell = "1.19.0"
+actix-files = "0.6.5"
+mime = "0.3.17"
+openssl = "0.10.62"
