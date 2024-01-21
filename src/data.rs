@@ -1,19 +1,25 @@
+use hex::{FromHex};
 use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+use uuid::Uuid;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct User {
-    pub uuid: String,
-    pub name: String,
+    pub user_uuid: Uuid,
+    pub username: String,
+    pub hashed_pass: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Channel {
-    pub uuid: String,
+#[derive(Debug, FromRow, Serialize, Deserialize)]
+pub struct Thread {
+    pub thread_uuid: Uuid,
+    pub threadname: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Message {
-    pub contents: String,
-    pub sender_uuid: String,
+    pub message_uuid: Uuid,
+    pub sender_uuid: Uuid,
     pub unix_timestamp: u64,
+    pub contents: String,
 }

@@ -15,6 +15,7 @@ use actix_web::{App, HttpServer, Responder, web};
 use once_cell::sync::Lazy;
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 use sqlx::mysql::MySqlPoolOptions;
+use sqlx::{MySql, Pool};
 
 static ARGS: Lazy<HashMap<String, String>> = Lazy::new(|| parse_arguments());
 static ADDRESS: Lazy<&str> = Lazy::new(||
@@ -46,16 +47,16 @@ static KEY_PATH: Lazy<String> = Lazy::new(|| shellexpand::tilde(ARGS.get("key")
 static CERT_PATH: Lazy<String> = Lazy::new(|| shellexpand::tilde(ARGS.get("cert")
     .unwrap())
     .to_string());
+static POOL: Lazy<Pool<MySql>> = Lazy::new(|| {
+    println!("Connecting to MySQL database");
+    MySqlPoolOptions::new()
+        .max_connections(32)
+        .connect_lazy("mysql://connectr:werconnectr@localhost/connectr")
+        .expect("Failed to connect to MySQL database")
+});
 
 #[actix_web::main]
 async fn main() -> Result<()> {
-    println!("Connecting to MySQL database");
-    let pool = MySqlPoolOptions::new()
-        .max_connections(32)
-        .connect("mysql://localhost/test")
-        .await
-        .expect("Failed to connect to MySQL database");
-
     println!("Starting server on port {} with address {}", PORT.to_string(), ADDRESS.to_string());
     let mut server = HttpServer::new(||
         App::new()
@@ -63,6 +64,7 @@ async fn main() -> Result<()> {
                 .service(api::user)
                 .service(api::thread))
             .service(auth::auth)
+            .service(auth::register)
             .service(request_handler::login)
             .service(request_handler::home)
             .service(request_handler::download)
