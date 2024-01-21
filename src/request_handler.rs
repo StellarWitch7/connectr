@@ -1,11 +1,25 @@
 use std::path::{Path, PathBuf};
 use actix_files::NamedFile;
-use actix_web::{Responder, HttpRequest, get};
+use actix_web::{Responder, HttpRequest, get, HttpResponse};
+use crate::auth::verify_user_by_token;
 use crate::resource_manager::{get_file};
 use crate::ROOT_PATH;
 
 #[get("/home")]
 pub async fn home(req: HttpRequest) -> impl Responder {
+    let auth_token = req.cookie("auth_token")
+        .expect("Client has no auth token");
+    let user = verify_user_by_token(auth_token.value(), req.connection_info()
+        .realip_remote_addr()
+        .expect("Could not get client IP"))
+        .await;
+
+    if user.is_none() {
+        return HttpResponse::Unauthorized().finish();
+    }
+
+    let user = user.unwrap();
+
     let mut home = PathBuf::from(ROOT_PATH.clone());
     home.push("home.html");
 

@@ -1,4 +1,3 @@
-use hex::{FromHex};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
