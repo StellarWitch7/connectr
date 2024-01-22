@@ -18,7 +18,8 @@ pub struct Thread {
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Message {
     pub message_uuid: Uuid,
+    pub owner_thread_uuid: Uuid,
     pub sender_uuid: Uuid,
-    pub unix_timestamp: u64,
-    pub contents: String,
+    pub sent_time: u64,
+    pub message_contents: String,
 }

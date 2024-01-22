@@ -7,6 +7,7 @@ use actix_web::{HttpRequest, HttpResponse, post, Responder};
 use actix_web::cookie::CookieBuilder;
 use actix_web::cookie::time::Duration;
 use actix_web::web::{Form};
+use aes_gcm_siv::{AeadInPlace, Aes256GcmSiv, KeyInit, Nonce};
 use chrono::{DateTime, Days, Local};
 use hex::ToHex;
 use once_cell::sync::Lazy;
@@ -35,6 +36,8 @@ static SALT: Lazy<Vec<u8>> = Lazy::new(|| {
     file.read_to_end(&mut contents).expect("Could not read salt");
     contents
 });
+
+static NONCE: Lazy<&[u8; 12]> = Lazy::new(|| b"qwertyuiop[]");
 
 #[post("/auth")]
 pub async fn auth(req: HttpRequest, login: Form<Login>) -> impl Responder {
@@ -109,9 +112,36 @@ fn create_token(user: &User, ip: &str) -> String {
     Update::update(&mut hasher, user.hashed_pass.as_bytes());
     Update::update(&mut hasher, ip.as_bytes());
 
-    let result: String = hasher.finalize().to_vec().encode_hex();
+    let mut result: String = hasher.finalize().to_vec().encode_hex();
+    result = format!("{}|{}|{}", expiry, user.user_uuid, result);
 
-    format!("{}|{}|{}", expiry, user.user_uuid, result)
+    encrypt_with_salt(result)
+}
+
+pub fn encrypt_with_salt(data: String) -> String {
+    let cipher = Aes256GcmSiv::new_from_slice(SALT.to_vec().iter().as_ref())
+        .expect("Cannot encrypt with salt of invalid length");
+    let nonce = Nonce::from_slice(NONCE.as_slice());
+
+    let mut buffer: Vec<u8> = vec!();
+    buffer.extend_from_slice(data.as_bytes());
+
+    cipher.encrypt_in_place(nonce, b"", &mut buffer).expect("Failed to encrypt data");
+    buffer.encode_hex()
+}
+
+pub fn decrypt_with_salt(data: String) -> String {
+    let cipher = Aes256GcmSiv::new_from_slice(SALT.to_vec().iter().as_ref())
+        .expect("Cannot encrypt with salt of invalid length");
+    let nonce = Nonce::from_slice(NONCE.as_slice());
+
+    let mut buffer: Vec<u8> = vec!();
+    buffer.extend_from_slice(hex::decode(data)
+        .expect("Failed to decode hex")
+        .as_slice());
+
+    cipher.decrypt_in_place(nonce, b"", &mut buffer).expect("Failed to decrypt data");
+    String::from_utf8(buffer.to_vec()).expect("Decrypted data is not valid utf-8")
 }
 
 fn create_hashed_pass(user_uuid: &[u8], password: &[u8]) -> String {
@@ -125,6 +155,7 @@ fn create_hashed_pass(user_uuid: &[u8], password: &[u8]) -> String {
 }
 
 pub async fn verify_user_by_token(cookie: &str, ip: &str) -> Option<User> {
+    let cookie = decrypt_with_salt(cookie.to_string());
     let mut split_cookie = cookie.splitn(3, "|");
 
     let expiry = DateTime::<Local>::from_str(split_cookie.nth(0)
