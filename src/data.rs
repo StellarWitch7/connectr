@@ -7,6 +7,7 @@ pub struct User {
     pub user_uuid: Uuid,
     pub username: String,
     pub hashed_pass: String,
+    pub reset_key: Vec<u8>,
 }
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]

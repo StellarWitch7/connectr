@@ -14,8 +14,6 @@ use std::string::ToString;
 use actix_web::{App, HttpServer, Responder, web};
 use once_cell::sync::Lazy;
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
-use sqlx::mysql::MySqlPoolOptions;
-use sqlx::{MySql, Pool};
 
 static ARGS: Lazy<HashMap<String, String>> = Lazy::new(|| parse_arguments());
 static ADDRESS: Lazy<&str> = Lazy::new(||
@@ -47,13 +45,6 @@ static KEY_PATH: Lazy<String> = Lazy::new(|| shellexpand::tilde(ARGS.get("key")
 static CERT_PATH: Lazy<String> = Lazy::new(|| shellexpand::tilde(ARGS.get("cert")
     .unwrap())
     .to_string());
-static POOL: Lazy<Pool<MySql>> = Lazy::new(|| {
-    println!("Connecting to MySQL database");
-    MySqlPoolOptions::new()
-        .max_connections(32)
-        .connect_lazy("mysql://connectr:werconnectr@localhost/connectr")
-        .expect("Failed to connect to MySQL database")
-});
 
 #[actix_web::main]
 async fn main() -> Result<()> {

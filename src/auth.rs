@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::{Read, Write};
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::str::FromStr;
 use actix_files::NamedFile;
@@ -22,7 +23,7 @@ use crate::{ROOT_PATH};
 
 static SALT: Lazy<Vec<u8>> = Lazy::new(|| {
     let mut salt = PathBuf::from(ROOT_PATH.clone());
-    salt.push("salt - DO NOT OPEN.bin");
+    salt.push("salt - KEEP SECURE.bin");
 
     if !salt.try_exists().expect("Couldn't verify if salt exists") {
         println!("Salt does not exist, generating...");
@@ -37,7 +38,43 @@ static SALT: Lazy<Vec<u8>> = Lazy::new(|| {
     contents
 });
 
-static NONCE: Lazy<&[u8; 12]> = Lazy::new(|| b"qwertyuiop[]");
+static SERVER_KEY: Lazy<[u8; 32]> = Lazy::new(|| {
+    let mut salt = PathBuf::from(ROOT_PATH.clone());
+    salt.push("key - KEEP SECURE.bin");
+
+    if !salt.try_exists().expect("Couldn't verify if key exists") {
+        println!("Key does not exist, generating...");
+        let random_bytes = random::<[u8; 32]>();
+        let mut file = File::create(salt.clone()).expect("Could not open key");
+        file.write_all(random_bytes.as_slice()).expect("Could not generate key");
+    }
+
+    let mut file = File::open(salt).expect("Could not open key");
+    let mut contents: Vec<u8> = vec!();
+    file.read_to_end(&mut contents).expect("Could not read key");
+
+    let result = <[u8; 32]>::try_from(contents.as_slice()).expect("Key is incorrect length");
+    result
+});
+
+static DEFAULT_NONCE: Lazy<[u8; 12]> = Lazy::new(|| {
+    let mut salt = PathBuf::from(ROOT_PATH.clone());
+    salt.push("nonce - KEEP SECURE.bin");
+
+    if !salt.try_exists().expect("Couldn't verify if nonce exists") {
+        println!("Nonce does not exist, generating...");
+        let random_bytes = random::<[u8; 12]>();
+        let mut file = File::create(salt.clone()).expect("Could not open nonce");
+        file.write_all(random_bytes.as_slice()).expect("Could not generate nonce");
+    }
+
+    let mut file = File::open(salt).expect("Could not open nonce");
+    let mut contents: Vec<u8> = vec!();
+    file.read_to_end(&mut contents).expect("Could not read nonce");
+
+    let result = <[u8; 12]>::try_from(contents.as_slice()).expect("Nonce is incorrect length");
+    result
+});
 
 #[post("/auth")]
 pub async fn auth(req: HttpRequest, login: Form<Login>) -> impl Responder {
@@ -50,7 +87,8 @@ pub async fn register(req: HttpRequest, login: Form<Login>) -> impl Responder {
     let Login { username, password } = login.clone();
     let user_uuid = Uuid::new_v4();
     let hashed_pass = create_hashed_pass(user_uuid.as_bytes(), password.as_bytes());
-    let user = User { user_uuid, username, hashed_pass };
+    let reset_key = random::<[u8; 16]>().to_vec();
+    let user = User { user_uuid, username, hashed_pass, reset_key };
 
     add_user(user).await.expect("Failed to register user, it may already exist");
 
@@ -106,22 +144,22 @@ fn create_token(user: &User, ip: &str) -> String {
     let mut hasher = sha2::Sha256::new();
     let expiry = chrono::Local::now().checked_add_days(Days::new(2)).unwrap();
 
-    Update::update(&mut hasher, SALT.iter().as_ref());
+    Update::update(&mut hasher, SALT.as_slice());
     Update::update(&mut hasher, expiry.to_string().as_bytes());
     Update::update(&mut hasher, user.user_uuid.as_bytes());
     Update::update(&mut hasher, user.hashed_pass.as_bytes());
+    Update::update(&mut hasher, user.reset_key.as_slice());
     Update::update(&mut hasher, ip.as_bytes());
 
     let mut result: String = hasher.finalize().to_vec().encode_hex();
     result = format!("{}|{}|{}", expiry, user.user_uuid, result);
 
-    encrypt_with_salt(result)
+    encrypt(result, DEFAULT_NONCE.deref())
 }
 
-pub fn encrypt_with_salt(data: String) -> String {
-    let cipher = Aes256GcmSiv::new_from_slice(SALT.to_vec().iter().as_ref())
-        .expect("Cannot encrypt with salt of invalid length");
-    let nonce = Nonce::from_slice(NONCE.as_slice());
+pub fn encrypt(data: String, nonce: &[u8; 12]) -> String {
+    let cipher = Aes256GcmSiv::new_from_slice(SERVER_KEY.as_ref()).unwrap();
+    let nonce = Nonce::from_slice(nonce);
 
     let mut buffer: Vec<u8> = vec!();
     buffer.extend_from_slice(data.as_bytes());
@@ -130,10 +168,9 @@ pub fn encrypt_with_salt(data: String) -> String {
     buffer.encode_hex()
 }
 
-pub fn decrypt_with_salt(data: String) -> String {
-    let cipher = Aes256GcmSiv::new_from_slice(SALT.to_vec().iter().as_ref())
-        .expect("Cannot encrypt with salt of invalid length");
-    let nonce = Nonce::from_slice(NONCE.as_slice());
+pub fn decrypt(data: String, nonce: &[u8; 12]) -> String {
+    let cipher = Aes256GcmSiv::new_from_slice(SERVER_KEY.as_ref()).unwrap();
+    let nonce = Nonce::from_slice(nonce);
 
     let mut buffer: Vec<u8> = vec!();
     buffer.extend_from_slice(hex::decode(data)
@@ -155,7 +192,7 @@ fn create_hashed_pass(user_uuid: &[u8], password: &[u8]) -> String {
 }
 
 pub async fn verify_user_by_token(cookie: &str, ip: &str) -> Option<User> {
-    let cookie = decrypt_with_salt(cookie.to_string());
+    let cookie = decrypt(cookie.to_string(), DEFAULT_NONCE.deref());
     let mut split_cookie = cookie.splitn(3, "|");
 
     let expiry = DateTime::<Local>::from_str(split_cookie.nth(0)
@@ -181,10 +218,11 @@ pub async fn verify_user_by_token(cookie: &str, ip: &str) -> Option<User> {
 
     let mut hasher = sha2::Sha256::new();
 
-    Update::update(&mut hasher, SALT.iter().as_ref());
+    Update::update(&mut hasher, SALT.as_slice());
     Update::update(&mut hasher, expiry.to_string().as_bytes());
     Update::update(&mut hasher, user_uuid.as_bytes());
     Update::update(&mut hasher, user.hashed_pass.as_bytes());
+    Update::update(&mut hasher, user.reset_key.as_slice());
     Update::update(&mut hasher, ip.as_bytes());
 
     let expected: String = hasher.finalize().to_vec().encode_hex();
