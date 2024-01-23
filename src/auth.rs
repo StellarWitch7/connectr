@@ -234,6 +234,15 @@ pub async fn verify_user_by_token(cookie: &str, ip: &str) -> Option<User> {
     Some(user)
 }
 
+pub async fn check_auth(req: HttpRequest) -> Option<User> {
+    let auth_token = req.cookie("auth_token")
+        .expect("Client has no auth token");
+    verify_user_by_token(auth_token.value(), req.connection_info()
+        .realip_remote_addr()
+        .expect("Could not get client IP"))
+        .await
+}
+
 #[derive(Deserialize, Clone)]
 struct Login {
     username: String,
