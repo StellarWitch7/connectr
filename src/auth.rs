@@ -1,17 +1,14 @@
-use std::fs::File;
 use std::io::{Read, Write};
-use std::ops::Deref;
-use std::path::PathBuf;
 use std::str::FromStr;
 use actix_files::NamedFile;
 use actix_web::{HttpRequest, HttpResponse, post, Responder};
 use actix_web::cookie::CookieBuilder;
 use actix_web::cookie::time::Duration;
-use actix_web::web::{Form};
+use actix_web::web::{Data, Form};
 use aes_gcm_siv::{AeadInPlace, Aes256GcmSiv, KeyInit, Nonce};
 use chrono::{DateTime, Days, Local};
 use hex::ToHex;
-use once_cell::sync::Lazy;
+use rand::distributions::{Distribution, Standard};
 use rand::random;
 use serde::Deserialize;
 use sha2::Digest;
@@ -19,96 +16,86 @@ use sha2::digest::{Update};
 use uuid::Uuid;
 use crate::data::User;
 use crate::db_manager::{add_user, get_user_by_username, get_user_by_uuid};
-use crate::{ROOT_PATH};
+use crate::{Args};
 
-static SALT: Lazy<Vec<u8>> = Lazy::new(|| {
-    let mut salt = PathBuf::from(ROOT_PATH.clone());
-    salt.push("salt - KEEP SECURE.bin");
+#[derive(Clone)]
+pub struct Auth {
+    salt: [u8; 32],
+    server_key: [u8; 32],
+    default_nonce: [u8; 12],
+}
 
-    if !salt.try_exists().expect("Couldn't verify if salt exists") {
-        println!("Salt does not exist, generating...");
-        let random_bytes = random::<[u8; 32]>();
-        let mut file = File::create(salt.clone()).expect("Could not open salt");
-        file.write_all(random_bytes.as_slice()).expect("Could not generate salt");
+impl Auth {
+    pub fn create(args: &Args) -> Self {
+        fn load_secret<T>(secret: &str, args: &Args) -> T
+            where Standard: Distribution<T>, T: TryFrom<Vec<u8>> + AsRef<[u8]>
+        {
+            let mut salt = args.root_path.clone();
+            salt.push(format!("{secret} - KEEP SECURE.bin"));
+
+            match salt.try_exists() {
+                Ok(false) => {
+                    println!("{secret} does not exist, generating...");
+                    let random_bytes = random::<T>();
+                    if let Err(err) = std::fs::write(&salt, random_bytes) {
+                        panic!("Could not write generated {secret}: {err}");
+                    }
+                }
+                Err(err) => panic!("Couldn't verify if {secret} exists: {err}"),
+                _ => {}
+            }
+
+            let contents = match std::fs::read(salt) {
+                Ok(vec) => vec,
+                Err(err) => panic!("Could not read {secret}: {err}"),
+            };
+
+            match T::try_from(contents) {
+                Ok(result) => result,
+                Err(err) => panic!("Invalid {secret} length")
+            }
+        }
+
+        Self {
+            salt: load_secret("salt", args),
+            server_key: load_secret("key", args),
+            default_nonce: load_secret("none", args)
+        }
     }
-
-    let mut file = File::open(salt).expect("Could not open salt");
-    let mut contents: Vec<u8> = vec!();
-    file.read_to_end(&mut contents).expect("Could not read salt");
-    contents
-});
-
-static SERVER_KEY: Lazy<[u8; 32]> = Lazy::new(|| {
-    let mut salt = PathBuf::from(ROOT_PATH.clone());
-    salt.push("key - KEEP SECURE.bin");
-
-    if !salt.try_exists().expect("Couldn't verify if key exists") {
-        println!("Key does not exist, generating...");
-        let random_bytes = random::<[u8; 32]>();
-        let mut file = File::create(salt.clone()).expect("Could not open key");
-        file.write_all(random_bytes.as_slice()).expect("Could not generate key");
-    }
-
-    let mut file = File::open(salt).expect("Could not open key");
-    let mut contents: Vec<u8> = vec!();
-    file.read_to_end(&mut contents).expect("Could not read key");
-
-    let result = <[u8; 32]>::try_from(contents.as_slice()).expect("Key is incorrect length");
-    result
-});
-
-static DEFAULT_NONCE: Lazy<[u8; 12]> = Lazy::new(|| {
-    let mut salt = PathBuf::from(ROOT_PATH.clone());
-    salt.push("nonce - KEEP SECURE.bin");
-
-    if !salt.try_exists().expect("Couldn't verify if nonce exists") {
-        println!("Nonce does not exist, generating...");
-        let random_bytes = random::<[u8; 12]>();
-        let mut file = File::create(salt.clone()).expect("Could not open nonce");
-        file.write_all(random_bytes.as_slice()).expect("Could not generate nonce");
-    }
-
-    let mut file = File::open(salt).expect("Could not open nonce");
-    let mut contents: Vec<u8> = vec!();
-    file.read_to_end(&mut contents).expect("Could not read nonce");
-
-    let result = <[u8; 12]>::try_from(contents.as_slice()).expect("Nonce is incorrect length");
-    result
-});
+}
 
 #[post("/auth")]
-pub async fn auth(req: HttpRequest, login: Form<Login>) -> impl Responder {
-    finish_auth(req, login.into_inner()).await
+pub async fn auth(req: HttpRequest, login: Form<Login>, args: Data<Args>, auth_data: Data<Auth>) -> impl Responder {
+    finish_auth(req, login.into_inner(), &args, &auth_data).await
 }
 
 #[post("/register")]
-pub async fn register(req: HttpRequest, login: Form<Login>) -> impl Responder {
+pub async fn register(req: HttpRequest, login: Form<Login>, args: Data<Args>, auth_data: Data<Auth>) -> impl Responder {
     let login = login.into_inner();
     let Login { username, password } = login.clone();
     let user_uuid = Uuid::new_v4();
-    let hashed_pass = create_hashed_pass(user_uuid.as_bytes(), password.as_bytes());
+    let hashed_pass = create_hashed_pass(user_uuid.as_bytes(), password.as_bytes(), &auth_data);
     let reset_key = random::<[u8; 16]>().to_vec();
     let user = User { user_uuid, username, hashed_pass, reset_key };
 
     add_user(user).await.expect("Failed to register user, it may already exist");
 
-    finish_auth(req, login).await
+    finish_auth(req, login, &args, &auth_data).await
 }
 
-async fn finish_auth(req: HttpRequest, login: Login) -> impl Responder {
+async fn finish_auth(req: HttpRequest, login: Login, args: &Args, auth_data: &Auth) -> impl Responder {
     let Login { username, password } = login;
-    let user = verify_user_by_password(&username, &password).await;
+    let user = verify_user_by_password(&username, &password, auth_data).await;
 
     if user.is_none() {
         return HttpResponse::Unauthorized().finish();
     }
 
     let user = user.expect("Internal failure, could not unwrap user UUID");
-    let token = create_token(&user, req.connection_info()
-        .realip_remote_addr()
-        .expect("Could not get client IP"));
+    let ip = req.connection_info().realip_remote_addr().expect("Could not get client IP").to_string();
+    let token = create_token(&user, &ip, auth_data);
 
-    let mut redirect = PathBuf::from(ROOT_PATH.clone());
+    let mut redirect = args.root_path.clone();
     redirect.push("redirect.html");
 
     let mut resp = NamedFile::open(redirect)
@@ -123,7 +110,7 @@ async fn finish_auth(req: HttpRequest, login: Login) -> impl Responder {
     resp
 }
 
-async fn verify_user_by_password(username: &str, password: &str) -> Option<User> {
+async fn verify_user_by_password(username: &str, password: &str, auth_data: &Auth) -> Option<User> {
     let user = get_user_by_username(username).await;
 
     if user.is_err() {
@@ -131,7 +118,7 @@ async fn verify_user_by_password(username: &str, password: &str) -> Option<User>
     }
 
     let user = user.unwrap();
-    let hashed_pass = create_hashed_pass(user.user_uuid.as_bytes(), password.as_bytes());
+    let hashed_pass = create_hashed_pass(user.user_uuid.as_bytes(), password.as_bytes(), auth_data);
 
     if user.hashed_pass != hashed_pass {
         return None;
@@ -140,11 +127,11 @@ async fn verify_user_by_password(username: &str, password: &str) -> Option<User>
     Some(user)
 }
 
-fn create_token(user: &User, ip: &str) -> String {
+fn create_token(user: &User, ip: &str, auth_data: &Auth) -> String {
     let mut hasher = sha2::Sha256::new();
     let expiry = chrono::Local::now().checked_add_days(Days::new(2)).unwrap();
 
-    Update::update(&mut hasher, SALT.as_slice());
+    Update::update(&mut hasher, &auth_data.salt);
     Update::update(&mut hasher, expiry.to_string().as_bytes());
     Update::update(&mut hasher, user.user_uuid.as_bytes());
     Update::update(&mut hasher, user.hashed_pass.as_bytes());
@@ -154,11 +141,11 @@ fn create_token(user: &User, ip: &str) -> String {
     let mut result: String = hasher.finalize().to_vec().encode_hex();
     result = format!("{}|{}|{}", expiry, user.user_uuid, result);
 
-    encrypt(result, DEFAULT_NONCE.deref())
+    encrypt(result, &auth_data.default_nonce, auth_data)
 }
 
-pub fn encrypt(data: String, nonce: &[u8; 12]) -> String {
-    let cipher = Aes256GcmSiv::new_from_slice(SERVER_KEY.as_ref()).unwrap();
+pub fn encrypt(data: String, nonce: &[u8; 12], auth_data: &Auth) -> String {
+    let cipher = Aes256GcmSiv::new_from_slice(&auth_data.server_key).unwrap();
     let nonce = Nonce::from_slice(nonce);
 
     let mut buffer: Vec<u8> = vec!();
@@ -168,8 +155,8 @@ pub fn encrypt(data: String, nonce: &[u8; 12]) -> String {
     buffer.encode_hex()
 }
 
-pub fn decrypt(data: String, nonce: &[u8; 12]) -> String {
-    let cipher = Aes256GcmSiv::new_from_slice(SERVER_KEY.as_ref()).unwrap();
+pub fn decrypt(data: String, nonce: &[u8; 12], auth_data: &Auth) -> String {
+    let cipher = Aes256GcmSiv::new_from_slice(&auth_data.server_key).unwrap();
     let nonce = Nonce::from_slice(nonce);
 
     let mut buffer: Vec<u8> = vec!();
@@ -181,18 +168,18 @@ pub fn decrypt(data: String, nonce: &[u8; 12]) -> String {
     String::from_utf8(buffer.to_vec()).expect("Decrypted data is not valid utf-8")
 }
 
-fn create_hashed_pass(user_uuid: &[u8], password: &[u8]) -> String {
+fn create_hashed_pass(user_uuid: &[u8], password: &[u8], auth_data: &Auth) -> String {
     let mut hasher = sha2::Sha256::new();
 
-    Update::update(&mut hasher, SALT.iter().as_ref());
+    Update::update(&mut hasher, &auth_data.salt);
     Update::update(&mut hasher, user_uuid);
     Update::update(&mut hasher, password);
 
     hasher.finalize().to_vec().encode_hex()
 }
 
-pub async fn verify_user_by_token(cookie: &str, ip: &str) -> Option<User> {
-    let cookie = decrypt(cookie.to_string(), DEFAULT_NONCE.deref());
+pub async fn verify_user_by_token(cookie: &str, ip: &str, auth_data: &Auth) -> Option<User> {
+    let cookie = decrypt(cookie.to_string(), &auth_data.default_nonce, auth_data);
     let mut split_cookie = cookie.splitn(3, "|");
 
     let expiry = DateTime::<Local>::from_str(split_cookie.nth(0)
@@ -218,7 +205,7 @@ pub async fn verify_user_by_token(cookie: &str, ip: &str) -> Option<User> {
 
     let mut hasher = sha2::Sha256::new();
 
-    Update::update(&mut hasher, SALT.as_slice());
+    Update::update(&mut hasher, &auth_data.salt);
     Update::update(&mut hasher, expiry.to_string().as_bytes());
     Update::update(&mut hasher, user_uuid.as_bytes());
     Update::update(&mut hasher, user.hashed_pass.as_bytes());
@@ -234,13 +221,18 @@ pub async fn verify_user_by_token(cookie: &str, ip: &str) -> Option<User> {
     Some(user)
 }
 
-pub async fn check_auth(req: HttpRequest) -> Option<User> {
-    let auth_token = req.cookie("auth_token")
+pub async fn check_auth(req: &HttpRequest, auth_data: &Auth) -> Option<User> {
+    let auth_token = req
+        .cookie("auth_token")
         .expect("Client has no auth token");
-    verify_user_by_token(auth_token.value(), req.connection_info()
+
+    let ip = req
+        .connection_info()
         .realip_remote_addr()
-        .expect("Could not get client IP"))
-        .await
+        .expect("Could not get client IP")
+        .to_string();
+
+    verify_user_by_token(auth_token.value(), &ip, auth_data).await
 }
 
 #[derive(Deserialize, Clone)]
