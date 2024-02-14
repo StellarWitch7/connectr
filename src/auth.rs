@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::{Read, Write};
 use std::str::FromStr;
 use actix_files::NamedFile;
@@ -9,6 +8,7 @@ use actix_web::web::{Data, Form};
 use aes_gcm_siv::{AeadInPlace, Aes256GcmSiv, KeyInit, Nonce};
 use chrono::{DateTime, Days, Local};
 use hex::ToHex;
+use rand::distributions::{Distribution, Standard};
 use rand::random;
 use serde::Deserialize;
 use sha2::Digest;
@@ -20,66 +20,46 @@ use crate::{Args};
 
 #[derive(Clone)]
 pub struct Auth {
-    salt: Vec<u8>,
+    salt: [u8; 32],
     server_key: [u8; 32],
     default_nonce: [u8; 12],
 }
 
 impl Auth {
     pub fn create(args: &Args) -> Self {
-        Self {
-            salt: {
-                let mut salt = args.root_path.clone();
-                salt.push("salt - KEEP SECURE.bin");
+        fn load_secret<T>(secret: &str, args: &Args) -> T
+            where Standard: Distribution<T>, T: TryFrom<Vec<u8>> + AsRef<[u8]>
+        {
+            let mut salt = args.root_path.clone();
+            salt.push(format!("{secret} - KEEP SECURE.bin"));
 
-                if !salt.try_exists().expect("Couldn't verify if salt exists") {
-                    println!("Salt does not exist, generating...");
-                    let random_bytes = random::<[u8; 32]>();
-                    let mut file = File::create(salt.clone()).expect("Could not open salt");
-                    file.write_all(random_bytes.as_slice()).expect("Could not generate salt");
+            match salt.try_exists() {
+                Ok(false) => {
+                    println!("{secret} does not exist, generating...");
+                    let random_bytes = random::<T>();
+                    if let Err(err) = std::fs::write(&salt, random_bytes) {
+                        panic!("Could not write generated {secret}: {err}");
+                    }
                 }
-
-                let mut file = File::open(salt).expect("Could not open salt");
-                let mut contents: Vec<u8> = vec!();
-                file.read_to_end(&mut contents).expect("Could not read salt");
-                contents
-            },
-            server_key: {
-                let mut salt = args.root_path.clone();
-                salt.push("key - KEEP SECURE.bin");
-
-                if !salt.try_exists().expect("Couldn't verify if key exists") {
-                    println!("Key does not exist, generating...");
-                    let random_bytes = random::<[u8; 32]>();
-                    let mut file = File::create(salt.clone()).expect("Could not open key");
-                    file.write_all(random_bytes.as_slice()).expect("Could not generate key");
-                }
-
-                let mut file = File::open(salt).expect("Could not open key");
-                let mut contents: Vec<u8> = vec!();
-                file.read_to_end(&mut contents).expect("Could not read key");
-
-                let result = <[u8; 32]>::try_from(contents.as_slice()).expect("Key is incorrect length");
-                result
-            },
-            default_nonce: {
-                let mut salt = args.root_path.clone();
-                salt.push("nonce - KEEP SECURE.bin");
-
-                if !salt.try_exists().expect("Couldn't verify if nonce exists") {
-                    println!("Nonce does not exist, generating...");
-                    let random_bytes = random::<[u8; 12]>();
-                    let mut file = File::create(salt.clone()).expect("Could not open nonce");
-                    file.write_all(random_bytes.as_slice()).expect("Could not generate nonce");
-                }
-
-                let mut file = File::open(salt).expect("Could not open nonce");
-                let mut contents: Vec<u8> = vec!();
-                file.read_to_end(&mut contents).expect("Could not read nonce");
-
-                let result = <[u8; 12]>::try_from(contents.as_slice()).expect("Nonce is incorrect length");
-                result
+                Err(err) => panic!("Couldn't verify if {secret} exists: {err}"),
+                _ => {}
             }
+
+            let contents = match std::fs::read(salt) {
+                Ok(vec) => vec,
+                Err(err) => panic!("Could not read {secret}: {err}"),
+            };
+
+            match T::try_from(contents) {
+                Ok(result) => result,
+                Err(err) => panic!("Invalid {secret} length")
+            }
+        }
+
+        Self {
+            salt: load_secret("salt", args),
+            server_key: load_secret("key", args),
+            default_nonce: load_secret("none", args)
         }
     }
 }
