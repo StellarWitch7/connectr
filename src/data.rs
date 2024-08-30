@@ -13,7 +13,7 @@ pub struct User {
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Thread {
     pub thread_uuid: Uuid,
-    pub threadname: String,
+    pub thread_name: String,
 }
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]

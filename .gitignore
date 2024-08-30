@@ -1,2 +1,5 @@
-/target
-.idea
+target/
+bruno/
+.idea/
+.direnv/
+.envrc

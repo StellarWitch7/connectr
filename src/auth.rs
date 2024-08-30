@@ -59,7 +59,7 @@ impl Auth {
         Self {
             salt: load_secret("salt", args),
             server_key: load_secret("key", args),
-            default_nonce: load_secret("none", args)
+            default_nonce: load_secret("nonce", args)
         }
     }
 }
