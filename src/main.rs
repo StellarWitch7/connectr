@@ -5,25 +5,37 @@ mod auth;
 mod db_manager;
 mod api;
 
+use std::any::Any;
 use std::collections::HashMap;
-use std::io::{Result};
 use std::iter::Iterator;
 use std::path::PathBuf;
 use std::string::ToString;
 use actix_web::{App, HttpServer, web};
 use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 use crate::auth::Auth;
+use crate::db_manager::init_db;
 
 #[actix_web::main]
-async fn main() -> Result<()> {
+async fn main() {
+    match run().await {
+        Err(message) => eprintln!("Server failure: {message}"),
+        _ => ()
+    }
+}
+
+async fn run() -> Result<(), String> {
     let args = Args::parse();
-    let auth = Auth::create(&args);
     let (addr, port) = (args.addr.clone(), args.port);
     println!("Starting server on port {} with address {}", args.port, args.addr);
 
-    let mut ssl_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
-    ssl_builder.set_private_key_file(&args.key_path, SslFiletype::PEM).unwrap();
-    ssl_builder.set_certificate_chain_file(&args.cert_path).unwrap();
+    let auth = Auth::create(&args)?;
+
+    let mut ssl_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())
+        .or_else(|e| Err(format!("Failed to build SSL profile: {e}")))?;
+    ssl_builder.set_private_key_file(&args.key_path, SslFiletype::PEM)
+        .or_else(|e| Err(format!("Failed to retrieve private key: {e}")))?;
+    ssl_builder.set_certificate_chain_file(&args.cert_path)
+        .or_else(|e| Err(format!("Failed to retrieve certificate chain: {e}")))?;
 
     let server = HttpServer::new(move || {
         App::new()
@@ -37,11 +49,14 @@ async fn main() -> Result<()> {
             .service(request_handler::download)
             .service(request_handler::default)
     })
-    .bind_openssl(format!("{}:{}", addr, port), ssl_builder)
-    .expect("Failed to bind to address");
+        .bind_openssl(format!("{}:{}", addr, port), ssl_builder)
+        .expect("Failed to bind to address");
 
+    init_db().await;
     println!("Server configured, running...");
-    server.run().await
+    server.run().await.or_else(|e| Err(format!("Server crash: {e}")))?;
+
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -53,6 +68,7 @@ struct Args {
     cert_path: PathBuf,
 }
 
+//TODO: make this error more nicely
 impl Args {
     pub fn parse() -> Self {
         let mut args = std::env::args().skip(1);
@@ -70,8 +86,8 @@ impl Args {
 
         Self {
             port: match dict.remove("port") {
-                None => 80,
-                Some(port) => port.parse::<u16>().unwrap_or(80),
+                None => 443,
+                Some(port) => port.parse::<u16>().unwrap_or(443),
             },
             addr: dict.remove("addr").unwrap_or_else(|| "localhost".into()),
             key_path: PathBuf::from(shellexpand::tilde(dict.get("key").unwrap()).to_string()),

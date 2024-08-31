@@ -26,8 +26,8 @@ pub struct Auth {
 }
 
 impl Auth {
-    pub fn create(args: &Args) -> Self {
-        fn load_secret<T>(secret: &str, args: &Args) -> T
+    pub fn create(args: &Args) -> Result<Self, String> {
+        fn load_secret<T>(secret: &str, args: &Args) -> Result<T, String>
             where Standard: Distribution<T>, T: TryFrom<Vec<u8>> + AsRef<[u8]>
         {
             let mut salt = args.root_path.clone();
@@ -38,29 +38,32 @@ impl Auth {
                     println!("{secret} does not exist, generating...");
                     let random_bytes = random::<T>();
                     if let Err(err) = std::fs::write(&salt, random_bytes) {
-                        panic!("Could not write generated {secret}: {err}");
+                        return Err(format!("Could not write generated {secret}: {err}"));
                     }
                 }
-                Err(err) => panic!("Couldn't verify if {secret} exists: {err}"),
+                Err(err) => return Err(format!("Couldn't verify if {secret} exists: {err}")),
                 _ => {}
             }
 
             let contents = match std::fs::read(salt) {
                 Ok(vec) => vec,
-                Err(err) => panic!("Could not read {secret}: {err}"),
+                Err(err) => return Err(format!("Could not read {secret}: {err}")),
             };
 
-            match T::try_from(contents) {
-                Ok(result) => result,
-                Err(err) => panic!("Invalid {secret} length")
-            }
+            T::try_from(contents).or_else(|e| Err(format!("Invalid {secret} length")))
         }
 
-        Self {
-            salt: load_secret("salt", args),
-            server_key: load_secret("key", args),
-            default_nonce: load_secret("nonce", args)
-        }
+        let salt = load_secret("salt", args)?;
+        let server_key = load_secret("key", args)?;
+        let default_nonce = load_secret("nonce", args)?;
+
+        Ok(
+            Self {
+                salt,
+                server_key,
+                default_nonce
+            }
+        )
     }
 }
 
@@ -76,10 +79,9 @@ pub async fn register(req: HttpRequest, login: Form<Login>, args: Data<Args>, au
     let user_uuid = Uuid::new_v4();
     let hashed_pass = create_hashed_pass(user_uuid.as_bytes(), password.as_bytes(), &auth_data);
     let reset_key = random::<[u8; 16]>().to_vec();
-    let user = User { user_uuid, username, hashed_pass, reset_key };
+    let user = User { uuid: user_uuid, name: username, hashed_pass, reset_key };
 
     add_user(user).await.expect("Failed to register user, it may already exist");
-
     finish_auth(req, login, &args, &auth_data).await
 }
 
@@ -107,6 +109,7 @@ async fn finish_auth(req: HttpRequest, login: Login, args: &Args, auth_data: &Au
         .max_age(Duration::days(3))
         .finish())
         .expect("Failed to add cookie to response");
+
     resp
 }
 
@@ -118,7 +121,7 @@ async fn verify_user_by_password(username: &str, password: &str, auth_data: &Aut
     }
 
     let user = user.unwrap();
-    let hashed_pass = create_hashed_pass(user.user_uuid.as_bytes(), password.as_bytes(), auth_data);
+    let hashed_pass = create_hashed_pass(user.uuid.as_bytes(), password.as_bytes(), auth_data);
 
     if user.hashed_pass != hashed_pass {
         return None;
@@ -133,13 +136,13 @@ fn create_token(user: &User, ip: &str, auth_data: &Auth) -> String {
 
     Update::update(&mut hasher, &auth_data.salt);
     Update::update(&mut hasher, expiry.to_string().as_bytes());
-    Update::update(&mut hasher, user.user_uuid.as_bytes());
+    Update::update(&mut hasher, user.uuid.as_bytes());
     Update::update(&mut hasher, user.hashed_pass.as_bytes());
     Update::update(&mut hasher, user.reset_key.as_slice());
     Update::update(&mut hasher, ip.as_bytes());
 
     let mut result: String = hasher.finalize().to_vec().encode_hex();
-    result = format!("{}|{}|{}", expiry, user.user_uuid, result);
+    result = format!("{}|{}|{}", expiry, user.uuid, result);
 
     encrypt(result, &auth_data.default_nonce, auth_data)
 }
@@ -155,6 +158,7 @@ pub fn encrypt(data: String, nonce: &[u8; 12], auth_data: &Auth) -> String {
     buffer.encode_hex()
 }
 
+//TODO: this and its dep should use Result and the request handler should return HTTP 401 no-auth
 pub fn decrypt(data: String, nonce: &[u8; 12], auth_data: &Auth) -> String {
     let cipher = Aes256GcmSiv::new_from_slice(&auth_data.server_key).unwrap();
     let nonce = Nonce::from_slice(nonce);
