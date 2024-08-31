@@ -1,6 +1,5 @@
 use std::io::{Read, Write};
 use std::str::FromStr;
-use actix_files::NamedFile;
 use actix_web::{HttpRequest, HttpResponse, post, Responder};
 use actix_web::cookie::CookieBuilder;
 use actix_web::cookie::time::Duration;
@@ -17,6 +16,12 @@ use uuid::Uuid;
 use crate::data::User;
 use crate::db_manager::{add_user, get_user_by_username, get_user_by_uuid};
 use crate::{Args};
+
+#[derive(Deserialize, Clone)]
+struct Login {
+    username: String,
+    password: String,
+}
 
 #[derive(Clone)]
 pub struct Auth {
@@ -69,7 +74,7 @@ impl Auth {
 
 #[post("/auth")]
 pub async fn auth(req: HttpRequest, login: Form<Login>, args: Data<Args>, auth_data: Data<Auth>) -> impl Responder {
-    finish_auth(req, login.into_inner(), &args, &auth_data).await
+    finish_auth(req, login.into_inner(), &auth_data).await
 }
 
 #[post("/register")]
@@ -82,33 +87,37 @@ pub async fn register(req: HttpRequest, login: Form<Login>, args: Data<Args>, au
     let user = User { uuid: user_uuid, name: username, hashed_pass, reset_key };
 
     add_user(user).await.expect("Failed to register user, it may already exist");
-    finish_auth(req, login, &args, &auth_data).await
+    finish_auth(req, login, &auth_data).await
 }
 
-async fn finish_auth(req: HttpRequest, login: Login, args: &Args, auth_data: &Auth) -> impl Responder {
+async fn finish_auth(req: HttpRequest, login: Login, auth_data: &Auth) -> impl Responder {
     let Login { username, password } = login;
-    let user = verify_user_by_password(&username, &password, auth_data).await;
 
-    if user.is_none() {
-        return HttpResponse::Unauthorized().finish();
-    }
+    let user = match verify_user_by_password(&username, &password, auth_data).await {
+        Some(val) => val,
+        None => return HttpResponse::Unauthorized().finish()
+    };
 
-    let user = user.expect("Internal failure, could not unwrap user UUID");
-    let ip = req.connection_info().realip_remote_addr().expect("Could not get client IP").to_string();
-    let token = create_token(&user, &ip, auth_data);
+    let ip = match req.connection_info().realip_remote_addr() {
+        Some(val) => val.to_string(),
+        None => return HttpResponse::Unauthorized().finish()
+    };
 
-    let mut redirect = args.root_path.clone();
-    redirect.push("redirect.html");
+    let token = match create_token(&user, &ip, auth_data) {
+        Ok(val) => val,
+        Err(_) => return HttpResponse::Unauthorized().finish()
+    };
 
-    let mut resp = NamedFile::open(redirect)
-        .unwrap()
-        .into_response(&req);
-    resp.add_cookie(&CookieBuilder::new("auth_token", token)
+    let mut resp = HttpResponse::Ok().finish();
+
+    match resp.add_cookie(&CookieBuilder::new("auth_token", token)
         .secure(true)
         .http_only(true)
         .max_age(Duration::days(3))
-        .finish())
-        .expect("Failed to add cookie to response");
+        .finish()) {
+        Ok(_) => println!("User {username} authenticated at {}", Local::now()),
+        Err(_) => return HttpResponse::Unauthorized().finish()
+    };
 
     resp
 }
@@ -130,9 +139,9 @@ async fn verify_user_by_password(username: &str, password: &str, auth_data: &Aut
     Some(user)
 }
 
-fn create_token(user: &User, ip: &str, auth_data: &Auth) -> String {
+fn create_token(user: &User, ip: &str, auth_data: &Auth) -> Result<String, String> {
     let mut hasher = sha2::Sha256::new();
-    let expiry = chrono::Local::now().checked_add_days(Days::new(2)).unwrap();
+    let expiry = Local::now().checked_add_days(Days::new(2)).unwrap();
 
     Update::update(&mut hasher, &auth_data.salt);
     Update::update(&mut hasher, expiry.to_string().as_bytes());
@@ -147,29 +156,32 @@ fn create_token(user: &User, ip: &str, auth_data: &Auth) -> String {
     encrypt(result, &auth_data.default_nonce, auth_data)
 }
 
-pub fn encrypt(data: String, nonce: &[u8; 12], auth_data: &Auth) -> String {
-    let cipher = Aes256GcmSiv::new_from_slice(&auth_data.server_key).unwrap();
+pub fn encrypt(data: String, nonce: &[u8; 12], auth_data: &Auth) -> Result<String, String> {
+    let cipher = Aes256GcmSiv::new_from_slice(&auth_data.server_key)
+        .or_else(|e| Err(format!("Failed to use private server key: {e}")))?;
     let nonce = Nonce::from_slice(nonce);
 
     let mut buffer: Vec<u8> = vec!();
     buffer.extend_from_slice(data.as_bytes());
 
-    cipher.encrypt_in_place(nonce, b"", &mut buffer).expect("Failed to encrypt data");
-    buffer.encode_hex()
+    cipher.encrypt_in_place(nonce, b"", &mut buffer).or_else(|e| Err(format!("Failed to encrypt data: {e}")))?;
+    Ok(buffer.encode_hex())
 }
 
-//TODO: this and its dep should use Result and the request handler should return HTTP 401 no-auth
-pub fn decrypt(data: String, nonce: &[u8; 12], auth_data: &Auth) -> String {
-    let cipher = Aes256GcmSiv::new_from_slice(&auth_data.server_key).unwrap();
-    let nonce = Nonce::from_slice(nonce);
+pub fn decrypt(data: String, auth_data: &Auth) -> Result<String, String> {
+    let cipher = Aes256GcmSiv::new_from_slice(&auth_data.server_key)
+        .or_else(|e| Err(format!("Failed to use private server key: {e}")))?;
+    let nonce = Nonce::from_slice(&auth_data.default_nonce);
 
     let mut buffer: Vec<u8> = vec!();
     buffer.extend_from_slice(hex::decode(data)
-        .expect("Failed to decode hex")
+        .or_else(|e| Err(format!("Failed to decode hex: {e}")))?
         .as_slice());
 
-    cipher.decrypt_in_place(nonce, b"", &mut buffer).expect("Failed to decrypt data");
-    String::from_utf8(buffer.to_vec()).expect("Decrypted data is not valid utf-8")
+    cipher.decrypt_in_place(nonce, b"", &mut buffer)
+        .or_else(|e| Err("Failed to decrypt data".to_string()))?;
+    String::from_utf8(buffer.to_vec())
+        .or_else(|e| Err(format!("Decrypted data is not valid UTF-8: {e}")))
 }
 
 fn create_hashed_pass(user_uuid: &[u8], password: &[u8], auth_data: &Auth) -> String {
@@ -183,64 +195,55 @@ fn create_hashed_pass(user_uuid: &[u8], password: &[u8], auth_data: &Auth) -> St
 }
 
 pub async fn verify_user_by_token(cookie: &str, ip: &str, auth_data: &Auth) -> Option<User> {
-    let cookie = decrypt(cookie.to_string(), &auth_data.default_nonce, auth_data);
-    let mut split_cookie = cookie.splitn(3, "|");
+    match decrypt(cookie.to_string(), auth_data) {
+        Ok(cookie) => {
+            let mut split_cookie = cookie.splitn(3, "|");
 
-    let expiry = DateTime::<Local>::from_str(split_cookie.nth(0)
-        .expect("Could not read expiry date"))
-        .expect("Could not parse expiry date");
-    let user_uuid = Uuid::from_str(split_cookie.nth(0)
-        .expect("Could not read user UUID"))
-        .expect("Could not parse user UUID");
-    let token = split_cookie.nth(0)
-        .expect("Could not read token");
+            let expiry = match DateTime::<Local>::from_str(split_cookie.nth(0)?) {
+                Ok(val) => val,
+                Err(_) => return None
+            };
 
-    if expiry < Local::now() {
-        return None;
+            let user_uuid = match Uuid::from_str(split_cookie.nth(0)?) {
+                Ok(val) => val,
+                Err(_) => return None
+            };
+
+            let token = split_cookie.nth(0)?;
+
+            if expiry < Local::now() {
+                return None;
+            }
+
+            let user = match get_user_by_uuid(user_uuid).await {
+                Ok(val) => val,
+                Err(_) => return None
+            };
+
+            let mut hasher = sha2::Sha256::new();
+
+            Update::update(&mut hasher, &auth_data.salt);
+            Update::update(&mut hasher, expiry.to_string().as_bytes());
+            Update::update(&mut hasher, user_uuid.as_bytes());
+            Update::update(&mut hasher, user.hashed_pass.as_bytes());
+            Update::update(&mut hasher, user.reset_key.as_slice());
+            Update::update(&mut hasher, ip.as_bytes());
+
+            let expected: String = hasher.finalize().to_vec().encode_hex();
+
+            if token != expected.as_str() {
+                return None;
+            }
+
+            Some(user)
+        },
+        Err(_) => None
     }
-
-    let user = get_user_by_uuid(user_uuid).await;
-
-    if user.is_err() {
-        return None;
-    }
-
-    let user = user.unwrap();
-
-    let mut hasher = sha2::Sha256::new();
-
-    Update::update(&mut hasher, &auth_data.salt);
-    Update::update(&mut hasher, expiry.to_string().as_bytes());
-    Update::update(&mut hasher, user_uuid.as_bytes());
-    Update::update(&mut hasher, user.hashed_pass.as_bytes());
-    Update::update(&mut hasher, user.reset_key.as_slice());
-    Update::update(&mut hasher, ip.as_bytes());
-
-    let expected: String = hasher.finalize().to_vec().encode_hex();
-
-    if token != expected.as_str() {
-        return None;
-    }
-
-    Some(user)
 }
 
 pub async fn check_auth(req: &HttpRequest, auth_data: &Auth) -> Option<User> {
-    let auth_token = req
-        .cookie("auth_token")
-        .expect("Client has no auth token");
-
-    let ip = req
-        .connection_info()
-        .realip_remote_addr()
-        .expect("Could not get client IP")
-        .to_string();
+    let auth_token = req.cookie("auth_token")?;
+    let ip = req.connection_info().realip_remote_addr()?.to_string();
 
     verify_user_by_token(auth_token.value(), &ip, auth_data).await
-}
-
-#[derive(Deserialize, Clone)]
-struct Login {
-    username: String,
-    password: String,
 }
