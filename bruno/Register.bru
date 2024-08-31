@@ -1,0 +1,16 @@
+meta {
+  name: Register
+  type: http
+  seq: 3
+}
+
+post {
+  url: https://localhost:63063/register
+  body: formUrlEncoded
+  auth: none
+}
+
+body:form-urlencoded {
+  username: test
+  password: test
+}

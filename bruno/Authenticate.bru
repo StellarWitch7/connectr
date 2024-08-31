@@ -1,0 +1,16 @@
+meta {
+  name: Authenticate
+  type: http
+  seq: 2
+}
+
+post {
+  url: https://localhost:63063/auth
+  body: formUrlEncoded
+  auth: none
+}
+
+body:form-urlencoded {
+  username: test
+  password: test
+}

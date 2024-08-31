@@ -74,7 +74,7 @@ impl Auth {
 
 #[post("/auth")]
 pub async fn auth(req: HttpRequest, login: Form<Login>, args: Data<Args>, auth_data: Data<Auth>) -> impl Responder {
-    finish_auth(req, login.into_inner(), &auth_data).await
+    finish_auth(req, login.into_inner(), &auth_data, &args).await
 }
 
 #[post("/register")]
@@ -86,14 +86,16 @@ pub async fn register(req: HttpRequest, login: Form<Login>, args: Data<Args>, au
     let reset_key = random::<[u8; 16]>().to_vec();
     let user = User { uuid: user_uuid, name: username, hashed_pass, reset_key };
 
-    add_user(user).await.expect("Failed to register user, it may already exist");
-    finish_auth(req, login, &auth_data).await
+    match add_user(user, &args).await {
+        Ok(_) => finish_auth(req, login, &auth_data, &args).await,
+        Err(_) => HttpResponse::Unauthorized().finish()
+    }
 }
 
-async fn finish_auth(req: HttpRequest, login: Login, auth_data: &Auth) -> impl Responder {
+async fn finish_auth(req: HttpRequest, login: Login, auth_data: &Auth, args: &Args) -> HttpResponse {
     let Login { username, password } = login;
 
-    let user = match verify_user_by_password(&username, &password, auth_data).await {
+    let user = match verify_user_by_password(&username, &password, auth_data, args).await {
         Some(val) => val,
         None => return HttpResponse::Unauthorized().finish()
     };
@@ -122,8 +124,8 @@ async fn finish_auth(req: HttpRequest, login: Login, auth_data: &Auth) -> impl R
     resp
 }
 
-async fn verify_user_by_password(username: &str, password: &str, auth_data: &Auth) -> Option<User> {
-    let user = get_user_by_username(username).await;
+async fn verify_user_by_password(username: &str, password: &str, auth_data: &Auth, args: &Args) -> Option<User> {
+    let user = get_user_by_username(username, args).await;
 
     if user.is_err() {
         return None;
@@ -194,7 +196,7 @@ fn create_hashed_pass(user_uuid: &[u8], password: &[u8], auth_data: &Auth) -> St
     hasher.finalize().to_vec().encode_hex()
 }
 
-pub async fn verify_user_by_token(cookie: &str, ip: &str, auth_data: &Auth) -> Option<User> {
+pub async fn verify_user_by_token(cookie: &str, ip: &str, auth_data: &Auth, args: &Args) -> Option<User> {
     match decrypt(cookie.to_string(), auth_data) {
         Ok(cookie) => {
             let mut split_cookie = cookie.splitn(3, "|");
@@ -215,7 +217,7 @@ pub async fn verify_user_by_token(cookie: &str, ip: &str, auth_data: &Auth) -> O
                 return None;
             }
 
-            let user = match get_user_by_uuid(user_uuid).await {
+            let user = match get_user_by_uuid(user_uuid, args).await {
                 Ok(val) => val,
                 Err(_) => return None
             };
@@ -241,9 +243,9 @@ pub async fn verify_user_by_token(cookie: &str, ip: &str, auth_data: &Auth) -> O
     }
 }
 
-pub async fn check_auth(req: &HttpRequest, auth_data: &Auth) -> Option<User> {
+pub async fn check_auth(req: &HttpRequest, auth_data: &Auth, args: &Args) -> Option<User> {
     let auth_token = req.cookie("auth_token")?;
     let ip = req.connection_info().realip_remote_addr()?.to_string();
 
-    verify_user_by_token(auth_token.value(), &ip, auth_data).await
+    verify_user_by_token(auth_token.value(), &ip, auth_data, args).await
 }

@@ -5,7 +5,7 @@ use crate::resource_manager::{get_file};
 
 #[get("/{other_url:.*}")]
 pub async fn default(req: HttpRequest, args: Data<Args>, auth_data: Data<Auth>) -> impl Responder {
-    let user = check_auth(&req, &auth_data).await;
+    let user = check_auth(&req, &auth_data, &args).await;
 
     if user.is_none() {
         return HttpResponse::Unauthorized().finish();
@@ -21,7 +21,7 @@ pub async fn default(req: HttpRequest, args: Data<Args>, auth_data: Data<Auth>) 
 
 #[get("/download/{other_url:.*}")]
 pub async fn download(req: HttpRequest, args: Data<Args>, auth_data: Data<Auth>) -> impl Responder {
-    let user = check_auth(&req, &auth_data).await;
+    let user = check_auth(&req, &auth_data, &args).await;
 
     if user.is_none() {
         return HttpResponse::Unauthorized().finish();
