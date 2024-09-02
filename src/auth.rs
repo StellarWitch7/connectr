@@ -125,20 +125,16 @@ async fn finish_auth(req: HttpRequest, login: Login, auth_data: &Auth, args: &Ar
 }
 
 async fn verify_user_by_password(username: &str, password: &str, auth_data: &Auth, args: &Args) -> Option<User> {
-    let user = get_user_by_username(username, args).await;
+    let user = match get_user_by_username(username, args).await {
+        Ok(val) => val,
+        Err(_) => return None
+    };
 
-    if user.is_err() {
-        return None;
+    if create_hashed_pass(user.uuid.as_bytes(), password.as_bytes(), auth_data) == user.hashed_pass {
+        Some(user)
+    } else {
+        None
     }
-
-    let user = user.unwrap();
-    let hashed_pass = create_hashed_pass(user.uuid.as_bytes(), password.as_bytes(), auth_data);
-
-    if user.hashed_pass != hashed_pass {
-        return None;
-    }
-
-    Some(user)
 }
 
 fn create_token(user: &User, ip: &str, auth_data: &Auth) -> Result<String, String> {
