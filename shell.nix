@@ -7,7 +7,7 @@ let
 in pkgs.mkShell {
   name = "connectr";
 
-  buildInputs = with pkgs; [
+  buildInputs = libs ++ (with pkgs; [
     cargo
     rustc
     gcc
@@ -17,8 +17,9 @@ in pkgs.mkShell {
     perl
     go
     ninja
-  ] ++ libs;
+  ]);
 
   RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
+  RUST_BACKTRACE = 1;
   LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libs;
 }

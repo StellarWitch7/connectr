@@ -24,7 +24,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
-    let args = Args::parse();
+    let args = Args::parse()?;
     let (addr, port) = (args.addr.clone(), args.port);
     println!("Starting server on port {} with address {}", args.port, args.addr);
 
@@ -72,33 +72,59 @@ struct Args {
     host_name: String
 }
 
-//TODO: make this error more nicely
 impl Args {
-    pub fn parse() -> Self {
+    pub fn parse() -> Result<Self, String> {
         let mut args = std::env::args().skip(1);
         let mut dict = HashMap::new();
+
         while let Some(arg_name) = args.next() {
             if !arg_name.starts_with("--") {
-                panic!("Bad argument: {}", arg_name);
+                return Err(format!("Bad argument: {}", arg_name));
             }
+
             let arg_value = match args.next() {
                 Some(val) => val,
-                None => panic!("No value provided for argument: {}", arg_name),
+                None => return Err(format!("No value provided for argument: {}", arg_name)),
             };
+
             dict.insert(arg_name[2..].to_string(), arg_value);
         }
 
-        Self {
+        fn missing(name: &str) -> Result<Args, String> {
+            Err(format!("Missing argument: {}", name))
+        }
+        
+        let root_path = PathBuf::from(shellexpand::tilde(match dict.get("root") {
+            Some(v) => v,
+            None => return missing("root")
+        }).to_string());
+
+        let key_path = PathBuf::from(shellexpand::tilde(match dict.get("key") {
+            Some(v) => v,
+            None => return missing("key")
+        }).to_string());
+        
+        let cert_path = PathBuf::from(shellexpand::tilde(match dict.get("cert") {
+            Some(v) => v,
+            None => return missing("cert")
+        }).to_string());
+        
+        let db_key = match dict.get("dbkey").map(|v| v.to_string()) {
+            Some(v) => v,
+            None => return missing("dbkey")
+        };
+        
+        Ok(Self {
             port: match dict.remove("port") {
                 None => 443,
                 Some(port) => port.parse::<u16>().unwrap_or(443),
             },
             addr: dict.remove("addr").unwrap_or_else(|| "localhost".into()),
-            key_path: PathBuf::from(shellexpand::tilde(dict.get("key").unwrap()).to_string()),
-            root_path: PathBuf::from(shellexpand::tilde(dict.get("root").unwrap()).to_string()),
-            cert_path: PathBuf::from(shellexpand::tilde(dict.get("cert").unwrap()).to_string()),
-            db_key: dict.get("dbkey").unwrap().to_string(),
-            host_name: dict.remove("hostname").unwrap_or_else(|| "localhost".to_string())
-        }
+            host_name: dict.remove("hostname").unwrap_or_else(|| "localhost".to_string()),
+            root_path,
+            key_path,
+            cert_path,
+            db_key
+        })
     }
 }

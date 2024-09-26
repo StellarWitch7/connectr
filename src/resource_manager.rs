@@ -1,8 +1,10 @@
 use std::path::Path;
 use actix_files::NamedFile;
 
-pub fn get_file(path: &Path, root: &Path) -> NamedFile {
-    let clean_path = path.to_str().unwrap().to_string().replace("\\", "/")
+pub fn get_file(path: &str, prefix: &str, root: &Path) -> NamedFile {
+    let clean_path = path
+        .replacen(prefix, "", 1)
+        .replace("\\", "/")
         .replace("../", "")
         .replace("./", "")
         .replace("%20", " ");

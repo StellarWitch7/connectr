@@ -1,4 +1,3 @@
-use std::io::{Read, Write};
 use std::str::FromStr;
 use actix_web::{HttpRequest, HttpResponse, post, Responder};
 use actix_web::cookie::CookieBuilder;
@@ -11,11 +10,11 @@ use rand::distributions::{Distribution, Standard};
 use rand::random;
 use serde::Deserialize;
 use sha2::Digest;
-use sha2::digest::{Update};
+use sha2::digest::Update;
 use uuid::Uuid;
 use crate::data::User;
 use crate::db_manager::{add_user, get_user_by_username, get_user_by_uuid};
-use crate::{Args};
+use crate::Args;
 
 #[derive(Deserialize, Clone)]
 struct Login {
@@ -94,24 +93,21 @@ pub async fn register(req: HttpRequest, login: Form<Login>, args: Data<Args>, au
 
 async fn finish_auth(req: HttpRequest, login: Login, auth_data: &Auth, args: &Args) -> HttpResponse {
     let Login { username, password } = login;
-
-    let user = match verify_user_by_password(&username, &password, auth_data, args).await {
+    let token = match
+        verify_user_by_password(&username, &password, auth_data, args)
+        .await
+        .and_then(|user| req.connection_info()
+                  .realip_remote_addr()
+                  .map(|ip| ip.to_string())
+                  .and_then(|ip| match create_token(&user, &ip, auth_data) {
+                      Ok(val) => Some(val),
+                      Err(_) => None
+                  })) {
         Some(val) => val,
         None => return HttpResponse::Unauthorized().finish()
     };
 
-    let ip = match req.connection_info().realip_remote_addr() {
-        Some(val) => val.to_string(),
-        None => return HttpResponse::Unauthorized().finish()
-    };
-
-    let token = match create_token(&user, &ip, auth_data) {
-        Ok(val) => val,
-        Err(_) => return HttpResponse::Unauthorized().finish()
-    };
-
     let mut resp = HttpResponse::Ok().finish();
-
     match resp.add_cookie(&CookieBuilder::new("auth_token", token)
         .secure(true)
         .http_only(true)
